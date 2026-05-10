@@ -8,14 +8,28 @@ JDK 17+（你本机已有 Java 就可以）
 Maven：brew install maven（或从 Maven 官网 安装）
 FFmpeg（含 ffprobe）：brew install ffmpeg
 LibreOffice（用来把 PPT 导出成 PNG）：brew install --cask libreoffice （这里mac可能会遇到问题，代码已修复好）
+如果下载不了，可以选择安装包下载的方式
+官网安装包
+打开：https://www.libreoffice.org/download/download/
+下载 macOS 版，拖进「应用程序」，再用上面同一条 --version 命令验证。
+
 # macOS
 brew install poppler
-
 # Ubuntu/Debian
 sudo apt update && sudo apt install -y poppler-utils
-
 # CentOS/RHEL
 sudo yum install -y poppler-utils
+
+安装好后在终端确认：
+java -version
+mvn -version
+ffmpeg -version
+ffprobe -version
+/Applications/LibreOffice.app/Contents/MacOS/soffice --version
+
+配置密钥（每次开终端或写进 ~/.zshrc）
+export DEEPSEEK_API_KEY="你的DeepSeek密钥"
+export MINIMAX_API_KEY="你的MiniMax密钥"
 
 
 
