@@ -2,22 +2,17 @@ package com.ych.contentfactory.export;
 
 import com.ych.contentfactory.config.PipelineConfig;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
+import java.io.File;
+import java.nio.file.*;
+import java.util.*;
+import java.util.regex.*;
+import java.util.stream.*;
 
 /**
- * 调用 LibreOffice 无界面将 .pptx 导出为 PNG 序列。
+ * 稳定导出方案：PPTX → PDF (LibreOffice) → PNG 序列 (pdftoppm)
+ * 修复 macOS/Linux 下文件名不匹配与文件系统延迟问题。
  */
 public final class LibreOfficePngExporter {
-
-    private static final Pattern SUFFIX_NUM = Pattern.compile(".*_(\\d+)\\.png$", Pattern.CASE_INSENSITIVE);
 
     private final Path soffice;
 
@@ -25,80 +20,111 @@ public final class LibreOfficePngExporter {
         this.soffice = cfg.sofficePath;
     }
 
-    /**
-     * 将 pptx 转为 framesDir 下的 slide_01.png ...
-     */
     public void exportPngs(Path pptxFile, Path framesDir) throws Exception {
         Files.createDirectories(framesDir);
         Path work = Files.createTempDirectory("ych-lo-");
         try {
-            Path single = work.resolve("deck.pptx");
-            Files.copy(pptxFile, single);
+            // 1️⃣ 复制 PPTX 到临时目录，使用固定名称避免路径解析歧义
+            Path srcPptx = work.resolve("input.pptx");
+            Files.copy(pptxFile, srcPptx, StandardCopyOption.REPLACE_EXISTING);
 
-            ProcessBuilder pb = new ProcessBuilder(
-                    soffice.toString(),
-                    "--headless",
-                    "--nologo",
-                    "--nofirststartwizard",
-                    "--convert-to",
-                    "png",
-                    "--outdir",
-                    work.toAbsolutePath().toString(),
-                    single.toAbsolutePath().toString()
+            // 2️⃣ LibreOffice 转 PDF
+            ProcessBuilder pbPdf = new ProcessBuilder(
+                    soffice.toString(), "--headless", "--nologo", "--nofirststartwizard",
+                    "--convert-to", "pdf",
+                    "--outdir", work.toAbsolutePath().toString(),
+                    srcPptx.toAbsolutePath().toString()
             );
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String out = new String(p.getInputStream().readAllBytes());
-            int code = p.waitFor();
-            if (code != 0) {
-                throw new IllegalStateException("LibreOffice 导出失败（exit=" + code + "）：\n" + out);
+            runAndCheck(pbPdf, "LibreOffice PDF 导出");
+
+            // 3️⃣ 动态查找实际生成的 PDF（兼容 LO 不同版本的命名行为 + macOS 延迟）
+            Path pdfFile = waitForPdf(work, 10);
+            if (pdfFile == null) {
+                throw new IllegalStateException("LibreOffice 未生成 PDF。请检查 PPTX 是否加密/损坏，或 LO 是否完整安装。");
             }
 
-            List<Path> pngs = new ArrayList<>(listPngs(work));
-            if (pngs.isEmpty()) {
-                throw new IllegalStateException("LibreOffice 未生成 PNG。进程输出：\n" + out);
+            // 4️⃣ PDF → PNG 序列
+            String pdftoppm = findCommand("pdftoppm");
+            if (pdftoppm == null) {
+                throw new IllegalStateException("未找到 pdftoppm 命令。\n" +
+                        "  macOS: brew install poppler\n" +
+                        "  Ubuntu: sudo apt install poppler-utils");
             }
-            pngs.sort(Comparator.comparingInt(LibreOfficePngExporter::pngOrderKey));
 
-            int i = 1;
-            for (Path src : pngs) {
-                String name = String.format(Locale.ROOT, "slide_%02d.png", i++);
-                Files.copy(src, framesDir.resolve(name), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            }
+            ProcessBuilder pbPng = new ProcessBuilder(
+                    pdftoppm, "-png", "-r", "150", "-f", "1",
+                    pdfFile.toAbsolutePath().toString(),
+                    framesDir.resolve("slide").toAbsolutePath().toString()
+            );
+            runAndCheck(pbPng, "pdftoppm PNG 拆分");
+
+            // 5️⃣ 重命名对齐流水线预期：slide-1.png → slide_01.png
+            renameToExpectedPattern(framesDir);
+
+            long count = Files.list(framesDir).filter(p -> p.toString().endsWith(".png")).count();
+            System.out.println("✅ 成功导出 " + count + " 页幻灯片 PNG。");
+
         } finally {
-            System.out.println("实际生成文件: " + java.util.Arrays.toString(Files.list(work).map(Path::getFileName).toArray()));
             deleteRecursive(work);
         }
     }
 
-    private static List<Path> listPngs(Path dir) throws Exception {
-        try (Stream<Path> s = Files.list(dir)) {
-            return s.filter(p -> p.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".png")).toList();
+    private void runAndCheck(ProcessBuilder pb, String stepName) throws Exception {
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String out = new String(p.getInputStream().readAllBytes());
+        boolean ok = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+        if (!ok || p.exitValue() != 0) {
+            p.destroyForcibly();
+            throw new IllegalStateException(stepName + " 失败（exit=" + p.exitValue() + "）:\n" + out);
         }
     }
 
-    private static int pngOrderKey(Path p) {
-        String n = p.getFileName().toString();
-        Matcher m = SUFFIX_NUM.matcher(n);
-        if (m.matches()) {
-            return Integer.parseInt(m.group(1));
+    /** 等待 PDF 文件出现（兼容 macOS FSEvents 延迟） */
+    private Path waitForPdf(Path dir, int maxRetries) throws Exception {
+        for (int i = 0; i < maxRetries; i++) {
+            try (Stream<Path> s = Files.list(dir)) {
+                Optional<Path> pdf = s.filter(p -> p.toString().toLowerCase().endsWith(".pdf")).findFirst();
+                if (pdf.isPresent()) return pdf.get();
+            }
+            Thread.sleep(100); // 每次等 100ms，最多 1s
         }
-        return 0;
+        return null;
+    }
+
+    private String findCommand(String cmd) {
+        for (String path : System.getenv("PATH").split(File.pathSeparator)) {
+            Path p = Paths.get(path, cmd);
+            if (Files.exists(p) && Files.isExecutable(p)) return cmd;
+        }
+        return null;
+    }
+
+    private void renameToExpectedPattern(Path dir) throws Exception {
+        try (Stream<Path> s = Files.list(dir)) {
+            s.filter(p -> p.getFileName().toString().matches("slide-\\d+\\.png"))
+                    .sorted(Comparator.comparingInt(p -> {
+                        Matcher m = Pattern.compile("slide-(\\d+)\\.png").matcher(p.getFileName().toString());
+                        return m.find() ? Integer.parseInt(m.group(1)) : 0;
+                    }))
+                    .forEach(p -> {
+                        Matcher m = Pattern.compile("slide-(\\d+)\\.png").matcher(p.getFileName().toString());
+                        if (m.find()) {
+                            int idx = Integer.parseInt(m.group(1));
+                            Path target = p.resolveSibling(String.format(Locale.ROOT, "slide_%02d.png", idx));
+                            try { Files.move(p, target, StandardCopyOption.REPLACE_EXISTING); }
+                            catch (Exception ignored) {}
+                        }
+                    });
+        }
     }
 
     private static void deleteRecursive(Path root) {
         try {
-            if (Files.notExists(root)) {
-                return;
-            }
+            if (Files.notExists(root)) return;
             try (Stream<Path> walk = Files.walk(root)) {
-                List<Path> paths = new ArrayList<>();
-                walk.sorted(Comparator.reverseOrder()).forEach(paths::add);
-                for (Path p : paths) {
-                    Files.deleteIfExists(p);
-                }
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> { try { Files.deleteIfExists(p); } catch (Exception ignored) {} });
             }
-        } catch (Exception ignored) {
-        }
+        } catch (Exception ignored) {}
     }
 }
