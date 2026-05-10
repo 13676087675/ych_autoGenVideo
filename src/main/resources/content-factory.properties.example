@@ -1,0 +1,17 @@
+# 复制本文件为 ~/.ych/content-factory.properties 并填写密钥（请勿提交到 Git）
+#
+# 优先级：环境变量 > 本文件 > 程序内置默认值
+
+# MiniMax TTS（必填其一键名即可）
+minimax.api.key=sk-api-dEAUDCXRIVFfMzF6PKxcjLw4pdPHzM3nluiuWRKKneApHQZ21g02olwaOLgS9zfsw7gKwKIXowgmX9hzzIRSazfemBNJIJkO8TlFmM6W62Qt-M2dFWucLsA
+
+# 大模型（DeepSeek 或其它 OpenAI 兼容接口）
+deepseek.api.key=sk-f13fa0df2a534706a39937c4b8e602cb
+# llm.base.url=https://api.deepseek.com
+# llm.model=deepseek-v4-pro
+
+# 可选
+# minimax.voice=male-qn-qingse
+# minimax.speed=1.0
+# soffice.path=/Applications/LibreOffice.app/Contents/MacOS/soffice
+# deepseek.extras=true
